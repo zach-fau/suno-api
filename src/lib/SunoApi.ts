@@ -18,7 +18,7 @@ const cache = globalForSunoApi.sunoApiCache || new Map<string, SunoApi>();
 globalForSunoApi.sunoApiCache = cache;
 
 const logger = pino();
-export const DEFAULT_MODEL = 'chirp-v3-5';
+export const DEFAULT_MODEL = 'chirp-crow'; // v5 (newest)
 
 export interface AudioInfo {
   id: string; // Unique identifier for the audio
@@ -305,43 +305,72 @@ class SunoApi {
    * @returns {string|null} hCaptcha token. If no verification is required, returns null
    */
   public async getCaptcha(): Promise<string|null> {
-    if (!await this.captchaRequired())
-      return null;
-
-    logger.info('CAPTCHA required. Launching browser...')
+    // TEMPORARILY DISABLED FOR TESTING - Just open browser and wait
+    logger.info('TESTING MODE: Launching browser...')
     const browser = await this.launchBrowser();
     const page = await browser.newPage();
     await page.goto('https://suno.com/create', { referer: 'https://www.google.com/', waitUntil: 'domcontentloaded', timeout: 0 });
 
     logger.info('Waiting for Suno interface to load');
-    // await page.locator('.react-aria-GridList').waitFor({ timeout: 60000 });
     await page.waitForResponse('**/api/project/**\\?**', { timeout: 60000 }); // wait for song list API call
 
+    logger.info('Page loaded! Browser will stay open for 5 minutes for inspection...');
+
+    // Just wait here so you can inspect the browser
+    await sleep(300); // Wait 5 minutes
+
+    logger.info('Closing browser after timeout');
+    await browser.browser()?.close();
+    return null; // Don't actually make any API calls
+
+    /* ORIGINAL CODE COMMENTED OUT FOR TESTING
     if (this.ghostCursorEnabled)
       this.cursor = await createCursor(page);
-    
+
     logger.info('Triggering the CAPTCHA');
     try {
       await page.getByLabel('Close').click({ timeout: 2000 }); // close all popups
       // await this.click(page, { x: 318, y: 13 });
     } catch(e) {}
 
-    const textarea = page.locator('.custom-textarea');
-    await this.click(textarea);
-    await textarea.pressSequentially('Lorem ipsum', { delay: 80 });
-
-    const button = page.locator('button[aria-label="Create"]').locator('div.flex');
-    this.click(button);
-
+    // Set up route interception BEFORE clicking the Create button
     const controller = new AbortController();
+    const tokenPromise = new Promise<string|null>((resolve, reject) => {
+      page.route('**/api/generate/v2/**', async (route: any) => {
+        try {
+          logger.info('hCaptcha token received. Closing browser');
+          route.abort();
+          browser.browser()?.close();
+          controller.abort();
+          const request = route.request();
+          this.currentToken = request.headers().authorization.split('Bearer ').pop();
+          resolve(request.postDataJSON().token);
+        } catch(err) {
+          reject(err);
+        }
+      });
+    });
+
+    // Updated selector - Suno UI changed, no longer uses .custom-textarea class
+    // Wait for textarea to be visible and enabled (it's the 2nd textarea on the page)
+    const textarea = page.locator('textarea[placeholder*="Hip-hop"]');
+    await textarea.waitFor({ state: 'visible', timeout: 10000 });
+    await textarea.focus();
+    await textarea.fill('Lorem ipsum');
+
+    const button = page.locator('button[aria-label="Create song"]');
+    await button.waitFor({ state: 'visible', timeout: 5000 });
+    await button.click();
     new Promise<void>(async (resolve, reject) => {
       const frame = page.frameLocator('iframe[title*="hCaptcha"]');
       const challenge = frame.locator('.challenge-container');
       try {
         let wait = true;
         while (true) {
-          if (wait)
-            await waitForRequests(page, controller.signal);
+          if (wait) {
+            // Wait for hCaptcha images to load (iframe requests aren't caught by page listeners)
+            await sleep(3);
+          }
           const drag = (await challenge.locator('.prompt-text').first().innerText()).toLowerCase().includes('drag');
           let captcha: any;
           for (let j = 0; j < 3; j++) { // try several times because sometimes 2Captcha could return an error
@@ -411,21 +440,9 @@ class SunoApi {
       browser.browser()?.close();
       throw e;
     });
-    return (new Promise((resolve, reject) => {
-      page.route('**/api/generate/v2/**', async (route: any) => {
-        try {
-          logger.info('hCaptcha token received. Closing browser');
-          route.abort();
-          browser.browser()?.close();
-          controller.abort();
-          const request = route.request();
-          this.currentToken = request.headers().authorization.split('Bearer ').pop();
-          resolve(request.postDataJSON().token);
-        } catch(err) {
-          reject(err);
-        }
-      });
-    }));
+
+    return tokenPromise;
+    */
   }
 
   /**
