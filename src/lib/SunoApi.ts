@@ -305,62 +305,148 @@ class SunoApi {
    * @returns {string|null} hCaptcha token. If no verification is required, returns null
    */
   public async getCaptcha(): Promise<string|null> {
-    // TEMPORARILY DISABLED FOR TESTING - Just open browser and wait
-    logger.info('TESTING MODE: Launching browser...')
     const browser = await this.launchBrowser();
     const page = await browser.newPage();
+    logger.info('Navigating to suno.com/create...');
     await page.goto('https://suno.com/create', { referer: 'https://www.google.com/', waitUntil: 'domcontentloaded', timeout: 0 });
 
-    logger.info('Waiting for Suno interface to load');
-    await page.waitForResponse('**/api/project/**\\?**', { timeout: 60000 }); // wait for song list API call
+    // Wait for the page to be fully loaded (React app needs time to render)
+    logger.info('Waiting for page to fully load...');
+    try {
+      // Wait for the song list API call which indicates the page is ready
+      await page.waitForResponse(response =>
+        response.url().includes('/api/project/') && response.status() === 200,
+        { timeout: 30000 }
+      );
+      logger.info('Page fully loaded');
+    } catch(e) {
+      logger.info('API response timeout - page might not be fully loaded, continuing anyway');
+    }
 
-    logger.info('Page loaded! Browser will stay open for 5 minutes for inspection...');
-
-    // Just wait here so you can inspect the browser
-    await sleep(300); // Wait 5 minutes
-
-    logger.info('Closing browser after timeout');
-    await browser.browser()?.close();
-    return null; // Don't actually make any API calls
-
-    /* ORIGINAL CODE COMMENTED OUT FOR TESTING
     if (this.ghostCursorEnabled)
       this.cursor = await createCursor(page);
 
     logger.info('Triggering the CAPTCHA');
+
+    // Try multiple methods to close popups
     try {
-      await page.getByLabel('Close').click({ timeout: 2000 }); // close all popups
-      // await this.click(page, { x: 318, y: 13 });
-    } catch(e) {}
+      logger.info('Attempting to close popup with getByLabel...');
+      await page.getByLabel('Close').click({ timeout: 2000 });
+      logger.info('Popup closed successfully');
+    } catch(e: any) {
+      logger.info('getByLabel failed, trying alternative selectors...');
+      try {
+        // Try button with aria-label
+        await page.locator('button[aria-label="Close"]').click({ timeout: 2000 });
+        logger.info('Popup closed with aria-label selector');
+      } catch(e2) {
+        // Try SVG close icon
+        try {
+          await page.locator('svg[data-testid="close-icon"]').click({ timeout: 2000 });
+          logger.info('Popup closed with SVG selector');
+        } catch(e3) {
+          logger.info('No popup found or unable to close - continuing anyway');
+        }
+      }
+    }
 
     // Set up route interception BEFORE clicking the Create button
     const controller = new AbortController();
+
+    // Log all API requests to see what's actually being called
+    page.on('request', request => {
+      if (request.url().includes('/api/')) {
+        logger.info(`API Request: ${request.method()} ${request.url()}`);
+      }
+    });
+
     const tokenPromise = new Promise<string|null>((resolve, reject) => {
-      page.route('**/api/generate/v2/**', async (route: any) => {
-        try {
-          logger.info('hCaptcha token received. Closing browser');
-          route.abort();
-          browser.browser()?.close();
-          controller.abort();
-          const request = route.request();
-          this.currentToken = request.headers().authorization.split('Bearer ').pop();
-          resolve(request.postDataJSON().token);
-        } catch(err) {
-          reject(err);
-        }
+      // Try multiple patterns to catch the generate request
+      const patterns = [
+        '**/api/generate/v2/**',
+        '**/api/generate/v3/**',
+        '**/api/generate/**',
+        '**/generate/**'
+      ];
+
+      patterns.forEach(pattern => {
+        page.route(pattern, async (route: any) => {
+          try {
+            logger.info(`Route intercepted! Pattern: ${pattern}, URL: ${route.request().url()}`);
+            logger.info('Extracting token from request...');
+
+            const request = route.request();
+            const headers = request.headers();
+            const postData = request.postDataJSON();
+
+            logger.info(`Headers: ${JSON.stringify(headers)}`);
+            logger.info(`Post data: ${JSON.stringify(postData)}`);
+
+            // Extract token from post data if it exists
+            const token = postData?.token || postData?.hcaptcha_token;
+
+            // Extract auth token from headers
+            if (headers.authorization) {
+              this.currentToken = headers.authorization.split('Bearer ').pop();
+            }
+
+            logger.info(`Captured token: ${token ? 'Yes' : 'No'}`);
+            logger.info('Aborting request and closing browser');
+
+            route.abort();
+            browser.browser()?.close();
+            controller.abort();
+
+            resolve(token || null);
+          } catch(err: any) {
+            logger.error(`Route interception error: ${err.message}`);
+            reject(err);
+          }
+        });
       });
     });
 
-    // Updated selector - Suno UI changed, no longer uses .custom-textarea class
-    // Wait for textarea to be visible and enabled (it's the 2nd textarea on the page)
-    const textarea = page.locator('textarea[placeholder*="Hip-hop"]');
-    await textarea.waitFor({ state: 'visible', timeout: 10000 });
+    // Find and fill the textarea - try multiple selectors
+    logger.info('Looking for song description textarea...');
+    let textarea;
+    try {
+      // Try original selector first
+      textarea = page.locator('textarea[placeholder*="Hip-hop"]');
+      await textarea.waitFor({ state: 'visible', timeout: 3000 });
+      logger.info('Found textarea with Hip-hop placeholder');
+    } catch(e) {
+      logger.info('Hip-hop placeholder not found, trying alternative selectors...');
+      // Try finding any visible textarea on the page
+      const textareas = page.locator('textarea');
+      const count = await textareas.count();
+      logger.info(`Found ${count} textareas on page`);
+
+      // Usually the song description textarea is the first or second one
+      for (let i = 0; i < count; i++) {
+        const ta = textareas.nth(i);
+        if (await ta.isVisible()) {
+          textarea = ta;
+          logger.info(`Using textarea at index ${i}`);
+          break;
+        }
+      }
+
+      if (!textarea) {
+        throw new Error('Could not find any visible textarea on the page');
+      }
+    }
+
+    logger.info('Filling textarea with test prompt...');
     await textarea.focus();
     await textarea.fill('Lorem ipsum');
+    logger.info('Textarea filled successfully');
 
+    logger.info('Looking for Create button...');
     const button = page.locator('button[aria-label="Create song"]');
     await button.waitFor({ state: 'visible', timeout: 5000 });
+    logger.info('Clicking Create button...');
     await button.click();
+    logger.info('Create button clicked - waiting for CAPTCHA...');
     new Promise<void>(async (resolve, reject) => {
       const frame = page.frameLocator('iframe[title*="hCaptcha"]');
       const challenge = frame.locator('.challenge-container');
@@ -442,7 +528,6 @@ class SunoApi {
     });
 
     return tokenPromise;
-    */
   }
 
   /**
