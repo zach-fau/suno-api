@@ -1,4 +1,10 @@
-> **Fork Notice:** This is a maintained fork of the original [gcui-art/suno-api](https://github.com/gcui-art/suno-api) project, which stopped working due to Suno UI changes. This fork fixes critical issues including updated selectors for Suno v5, race condition fixes, and CAPTCHA improvements. See commit history for details.
+> **🔥 Actively Maintained Fork** - The [original repo](https://github.com/gcui-art/suno-api) is no longer maintained (last update: February 2024). This fork includes critical fixes for Suno v5 compatibility:
+> - ✅ Updated UI selectors for Suno v5 interface changes
+> - ✅ Fixed race condition in route interception
+> - ✅ Fixed CAPTCHA iframe wait logic for reliable automation
+> - ✅ Updated default model to chirp-crow (v5 - latest)
+>
+> **This fork works right now.** The original is broken.
 
 <div align="center">
   <h1 align="center">
@@ -83,7 +89,7 @@ You can choose your preferred deployment method:
 #### Run locally
 
 ```bash
-git clone https://github.com/gcui-art/suno-api.git
+git clone https://github.com/zach-fau/suno-api.git
 cd suno-api
 npm install
 ```
