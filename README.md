@@ -1,8 +1,12 @@
 > **🔥 Actively Maintained Fork** - The [original repo](https://github.com/gcui-art/suno-api) is no longer maintained (last update: February 2024). This fork includes critical fixes for Suno v5 compatibility:
+> - ✅ **Fixed auth migration** - Suno moved from `clerk.suno.com` to `auth.suno.com` (December 2024)
+> - ✅ **Fixed browser cookie handling** - Proper multi-domain Clerk cookie setup for CAPTCHA solving
 > - ✅ Updated UI selectors for Suno v5 interface changes
 > - ✅ Fixed race condition in route interception
 > - ✅ Fixed CAPTCHA iframe wait logic for reliable automation
 > - ✅ Updated default model to chirp-crow (v5 - latest)
+>
+> See [CHANGELOG.md](./CHANGELOG.md) for full details.
 
 
 <div align="center">
