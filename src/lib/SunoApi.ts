@@ -614,30 +614,106 @@ class SunoApi {
       args.push('--enable-unsafe-swiftshader',
         '--disable-gpu',
         '--disable-setuid-sandbox');
+    // Auto-open DevTools when not headless (for debugging)
+    if (!yn(process.env.BROWSER_HEADLESS, { default: true }))
+      args.push('--auto-open-devtools-for-tabs');
     const browser = await this.getBrowserType().launch({
       args,
       headless: yn(process.env.BROWSER_HEADLESS, { default: true })
     });
     const context = await browser.newContext({ userAgent: this.userAgent, locale: process.env.BROWSER_LOCALE, viewport: null });
-    const cookies = [];
+    const cookies: Array<{name: string, value: string, domain: string, path: string, sameSite: 'Lax' | 'Strict' | 'None', secure?: boolean, httpOnly?: boolean}> = [];
     const lax: 'Lax' | 'Strict' | 'None' = 'Lax';
-    cookies.push({
-      name: '__session',
-      value: `${this.currentToken}`,
-      domain: '.suno.com',
-      path: '/',
-      sameSite: lax
-    });
+    const none: 'Lax' | 'Strict' | 'None' = 'None';
+
+    // DO NOT set __session cookie ourselves!
+    // The currentToken JWT has aud:"suno-api" which is for API calls only.
+    // Clerk middleware expects a browser session token with different claims.
+    // Let Clerk JS create __session by navigating to homepage first.
+
+    // Set most cookies on .suno.com domain (except special ones we handle separately)
     for (const key in this.cookies) {
+      if (key === '__client' || key === '__client_uat') continue;
       cookies.push({
         name: key,
         value: `${this.cookies[key]}`,
         domain: '.suno.com',
         path: '/',
         sameSite: lax
-      })
+      });
     }
+
+    // __client cookie must be on BOTH auth.suno.com AND clerk.suno.com!
+    // - suno.com uses auth.suno.com for Clerk API
+    // - accounts.suno.com uses clerk.suno.com for Clerk API
+    if (this.cookies.__client) {
+      // For auth.suno.com (used by suno.com)
+      cookies.push({
+        name: '__client',
+        value: `${this.cookies.__client}`,
+        domain: 'auth.suno.com',
+        path: '/',
+        sameSite: none,
+        secure: true,
+        httpOnly: true
+      });
+      // For clerk.suno.com (used by accounts.suno.com)
+      cookies.push({
+        name: '__client',
+        value: `${this.cookies.__client}`,
+        domain: 'clerk.suno.com',
+        path: '/',
+        sameSite: lax,  // clerk.suno.com uses SameSite=Lax
+        secure: true,
+        httpOnly: true
+      });
+    }
+
+    // __client_uat exists on BOTH domains with different values:
+    // 1. auth.suno.com with value "0" and SameSite=None
+    // 2. .suno.com with actual timestamp and SameSite=Lax
+    // CRITICAL: The timestamp is in session-variant cookies like __client_uat_Jnxw-muT
+    // The plain __client_uat from cookie parsing is often "0" which means "unauthenticated"!
+
+    // Find the REAL timestamp from session-variant __client_uat_* cookie
+    let clientUatTimestamp = this.cookies.__client_uat || '0';
+    for (const key in this.cookies) {
+      if (key.startsWith('__client_uat_') && this.cookies[key] && this.cookies[key] !== '0') {
+        clientUatTimestamp = this.cookies[key]!;
+        logger.debug(`Found session-variant UAT: ${key}=${clientUatTimestamp}`);
+        break;
+      }
+    }
+
+    if (clientUatTimestamp && clientUatTimestamp !== '0') {
+      // On auth.suno.com with value 0
+      cookies.push({
+        name: '__client_uat',
+        value: '0',
+        domain: 'auth.suno.com',
+        path: '/',
+        sameSite: none,
+        secure: true
+      });
+      // On .suno.com with actual timestamp - THIS IS CRITICAL FOR AUTH!
+      cookies.push({
+        name: '__client_uat',
+        value: clientUatTimestamp,
+        domain: '.suno.com',
+        path: '/',
+        sameSite: lax,
+        secure: true
+      });
+      logger.debug(`Setting __client_uat=${clientUatTimestamp} on .suno.com`);
+    } else {
+      logger.warn('No valid __client_uat timestamp found! Browser auth will fail.');
+    }
+
+    // Log cookies being set for debugging
+    logger.debug('Setting browser cookies:', cookies.map(c => ({ name: c.name, domain: c.domain, sameSite: c.sameSite, httpOnly: c.httpOnly })));
+
     await context.addCookies(cookies);
+
     return context;
   }
 
@@ -764,8 +840,35 @@ class SunoApi {
   public async getCaptcha(): Promise<string|null> {
     const browser = await this.launchBrowser();
     const page = await browser.newPage();
-    logger.info('Navigating to suno.com/create...');
-    await page.goto('https://suno.com/create', { referer: 'https://www.google.com/', waitUntil: 'domcontentloaded', timeout: SunoApi.TIMEOUTS.PAGE_NAVIGATION });
+
+    // When not headless, wait for DevTools to open so we can capture network requests
+    if (!yn(process.env.BROWSER_HEADLESS, { default: true })) {
+      logger.info('Waiting 5 seconds for DevTools to open... (switch to Network tab now!)');
+      await sleep(5);  // sleep() takes seconds, not ms!
+    }
+
+    // STEP 1: Navigate to homepage first to let Clerk JS establish session
+    // We don't have __session cookie - Clerk JS needs to create it by validating __client with auth.suno.com
+    logger.info('Step 1: Navigating to suno.com homepage to establish Clerk session...');
+    await page.goto('https://suno.com', { referer: 'https://www.google.com/', waitUntil: 'domcontentloaded', timeout: SunoApi.TIMEOUTS.PAGE_NAVIGATION });
+
+    // Wait for Clerk JS to authenticate (it calls auth.suno.com/v1/client and sets __session)
+    logger.info('Waiting for Clerk JS to establish session...');
+    try {
+      await page.waitForResponse(
+        response => response.url().includes('auth.suno.com/v1/client') && response.status() === 200,
+        { timeout: 10000 }
+      );
+      logger.info('Clerk authentication response received');
+      // Give Clerk JS time to process and set cookies
+      await sleep(2);
+    } catch (e) {
+      logger.warn('Clerk auth response timeout - continuing anyway');
+    }
+
+    // STEP 2: Now navigate to the protected page
+    logger.info('Step 2: Navigating to suno.com/create...');
+    await page.goto('https://suno.com/create', { referer: 'https://suno.com/', waitUntil: 'domcontentloaded', timeout: SunoApi.TIMEOUTS.PAGE_NAVIGATION });
 
     // Wait for the page to be fully loaded (React app needs time to render)
     logger.info('Waiting for page to fully load...');
